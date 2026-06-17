@@ -1,4 +1,4 @@
-package talo
+package config
 
 import (
 	"bytes"
@@ -21,29 +21,89 @@ const (
 	oneHour        = time.Hour
 )
 
-var (
-	defaultBaseURLs = map[Environment]string{
-		Production: "https://api.talo.com.ar",
-		Sandbox:    "https://sandbox-api.talo.com.ar",
-	}
+// Environment selects the Talo API base URL.
+type Environment string
+
+const (
+	Production Environment = "production"
+	Sandbox    Environment = "sandbox"
 )
 
-// Client is the main entry point for the Talo Pay API.
-type Client struct {
-	cfg          *Config
-	httpClient   *http.Client
-	tokenManager *tokenManager
-	baseURL      string
-
-	// Sub-services for resource-oriented access (idiomatic Go)
-	Payments  *PaymentsService
-	Customers *CustomersService
-	Partners  *PartnersService
-	Refunds   *RefundsService
-	Sandbox   *SandboxService
+var defaultBaseURLs = map[Environment]string{
+	Production: "https://api.talo.com.ar",
+	Sandbox:    "https://sandbox-api.talo.com.ar",
 }
 
-// tokenManager handles fetching and caching JWT access tokens.
+// Config holds credentials and shared HTTP/token logic for Talo API clients.
+type Config struct {
+	ClientID     string
+	ClientSecret string
+	UserID       string
+	Environment  Environment
+	BaseURL      string
+	HTTPClient   *http.Client // optional custom HTTP client
+
+	// internal
+	tokenManager *tokenManager
+	httpClient   *http.Client
+	baseURL      string
+}
+
+// Option is a functional option for configuring Config.
+type Option func(*Config)
+
+// WithEnvironment sets the environment (Production or Sandbox).
+func WithEnvironment(env Environment) Option {
+	return func(c *Config) { c.Environment = env }
+}
+
+// WithBaseURL overrides the base URL completely.
+func WithBaseURL(baseURL string) Option {
+	return func(c *Config) { c.BaseURL = baseURL }
+}
+
+// WithHTTPClient sets a custom *http.Client.
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Config) { c.HTTPClient = hc }
+}
+
+// New creates a new Config with the required credentials.
+// It automatically sets up token management and HTTP client.
+func New(clientID, clientSecret, userID string, opts ...Option) (*Config, error) {
+	if clientID == "" || clientSecret == "" || userID == "" {
+		return nil, errors.New("clientID, clientSecret and userID are required")
+	}
+
+	cfg := &Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		UserID:       userID,
+		Environment:  Production,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: defaultTimeout}
+	}
+	cfg.httpClient = cfg.HTTPClient
+
+	base := cfg.BaseURL
+	if base == "" {
+		base = defaultBaseURLs[cfg.Environment]
+		if base == "" {
+			base = defaultBaseURLs[Production]
+		}
+	}
+	cfg.baseURL = strings.TrimRight(base, "/")
+
+	cfg.tokenManager = newTokenManager(cfg)
+
+	return cfg, nil
+}
+
 type tokenManager struct {
 	mu           sync.Mutex
 	token        string
@@ -53,24 +113,15 @@ type tokenManager struct {
 	clientSecret string
 	userID       string
 	httpClient   *http.Client
-	headers      http.Header
 }
 
-func newTokenManager(cfg *Config, httpClient *http.Client) *tokenManager {
-	base := cfg.BaseURL
-	if base == "" {
-		base = defaultBaseURLs[cfg.Environment]
-		if base == "" {
-			base = defaultBaseURLs[Production]
-		}
-	}
+func newTokenManager(cfg *Config) *tokenManager {
 	return &tokenManager{
-		baseURL:      strings.TrimRight(base, "/"),
+		baseURL:      cfg.baseURL,
 		clientID:     cfg.ClientID,
 		clientSecret: cfg.ClientSecret,
 		userID:       cfg.UserID,
-		httpClient:   httpClient,
-		headers:      cfg.Headers,
+		httpClient:   cfg.httpClient,
 	}
 }
 
@@ -82,12 +133,10 @@ func (tm *tokenManager) getAccessToken(ctx context.Context, forceRefresh bool) (
 		return tm.token, nil
 	}
 
-	// Simple in-memory singleflight: if already refreshing, wait? For simplicity we just proceed (rare contention)
 	token, expiresAt, err := tm.fetchToken(ctx)
 	if err != nil {
 		return "", err
 	}
-
 	tm.token = token
 	tm.expiresAt = expiresAt
 	return token, nil
@@ -115,13 +164,6 @@ func (tm *tokenManager) fetchToken(ctx context.Context) (string, time.Time, erro
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if tm.headers != nil {
-		for k, vv := range tm.headers {
-			for _, v := range vv {
-				req.Header.Add(k, v)
-			}
-		}
-	}
 
 	resp, err := tm.httpClient.Do(req)
 	if err != nil {
@@ -151,21 +193,17 @@ func (tm *tokenManager) fetchToken(ctx context.Context) (string, time.Time, erro
 	if exp, err := extractJWTExpiration(env.Data.Token); err == nil && !exp.IsZero() {
 		expiresAt = exp
 	}
-
 	return env.Data.Token, expiresAt, nil
 }
 
-// extractJWTExpiration parses the exp claim from a JWT (no signature validation).
 func extractJWTExpiration(token string) (time.Time, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return time.Time{}, errors.New("invalid jwt format")
 	}
 	payloadB64 := parts[1]
-	// base64url -> base64
 	payloadB64 = strings.ReplaceAll(payloadB64, "-", "+")
 	payloadB64 = strings.ReplaceAll(payloadB64, "_", "/")
-	// padding
 	switch len(payloadB64) % 4 {
 	case 2:
 		payloadB64 += "=="
@@ -176,7 +214,6 @@ func extractJWTExpiration(token string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-
 	var claims struct {
 		Exp int64 `json:"exp"`
 	}
@@ -189,44 +226,9 @@ func extractJWTExpiration(token string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
-// NewClient creates a new Talo API client.
-func NewClient(cfg Config) (*Client, error) {
-	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.UserID == "" {
-		return nil, errors.New("ClientID, ClientSecret and UserID are required")
-	}
-
-	if cfg.Environment == "" {
-		cfg.Environment = Production
-	}
-
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: defaultTimeout,
-		}
-	}
-
-	tm := newTokenManager(&cfg, httpClient)
-
-	c := &Client{
-		cfg:          &cfg,
-		httpClient:   httpClient,
-		tokenManager: tm,
-		baseURL:      tm.baseURL,
-	}
-
-	// Initialize sub-services
-	c.Payments = &PaymentsService{client: c}
-	c.Customers = &CustomersService{client: c}
-	c.Partners = &PartnersService{client: c}
-	c.Refunds = &RefundsService{client: c}
-	c.Sandbox = &SandboxService{client: c}
-
-	return c, nil
-}
-
-// doRequest performs an authenticated (or not) HTTP request and handles token refresh on 401.
-func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}, authRequired bool, out interface{}) error {
+// DoRequest performs an API call with automatic authentication and 401 retry.
+// This is used internally by resource clients.
+func (c *Config) DoRequest(ctx context.Context, method, path string, body interface{}, authRequired bool, out interface{}) error {
 	fullURL := c.buildURL(path)
 
 	var reqBody io.Reader
@@ -242,17 +244,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	if err != nil {
 		return err
 	}
-
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.cfg.Headers != nil {
-		for k, vv := range c.cfg.Headers {
-			for _, v := range vv {
-				req.Header.Add(k, v)
-			}
-		}
 	}
 
 	var token string
@@ -274,21 +268,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	requestID := resp.Header.Get("X-Request-ID")
 
 	if resp.StatusCode == http.StatusUnauthorized && authRequired {
-		// Refresh token and retry once
 		newToken, err := c.tokenManager.getAccessToken(ctx, true)
 		if err != nil {
 			return fmt.Errorf("token refresh failed: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+newToken)
-
-		// Re-create body reader if needed (since consumed)
 		if body != nil {
 			b, _ := json.Marshal(body)
 			req.Body = io.NopCloser(bytes.NewReader(b))
 		} else {
 			req.Body = nil
 		}
-
 		resp2, err := c.httpClient.Do(req)
 		if err != nil {
 			return err
@@ -296,7 +286,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		defer resp2.Body.Close()
 		rawBody, _ = io.ReadAll(resp2.Body)
 		requestID = resp2.Header.Get("X-Request-ID")
-		resp = resp2 // use for status check below
+		resp = resp2
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -307,45 +297,38 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		return nil
 	}
 
-	// Most responses are wrapped in { "data": ... }
-	var env responseEnvelope
-	if err := json.Unmarshal(rawBody, &env); err != nil {
-		// Some endpoints (like sandbox faucet) may return unwrapped response
-		if err := json.Unmarshal(rawBody, out); err != nil {
-			return fmt.Errorf("unmarshal response: %w (raw: %s)", err, string(rawBody))
-		}
-		return nil
+	// Try envelope {data: ...} first, fallback to direct
+	var env struct {
+		Data json.RawMessage `json:"data"`
 	}
-
-	if len(env.Data) > 0 {
-		if err := json.Unmarshal(env.Data, out); err != nil {
-			return fmt.Errorf("unmarshal data: %w", err)
-		}
-	} else {
-		// fallback direct unmarshal
-		if err := json.Unmarshal(rawBody, out); err != nil {
-			return fmt.Errorf("unmarshal response: %w (raw: %s)", err, string(rawBody))
-		}
+	if err := json.Unmarshal(rawBody, &env); err == nil && len(env.Data) > 0 {
+		return json.Unmarshal(env.Data, out)
 	}
-	return nil
+	return json.Unmarshal(rawBody, out)
 }
 
-func (c *Client) buildURL(path string) string {
+func (c *Config) buildURL(path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
 	}
-	base := strings.TrimRight(c.baseURL, "/")
+	base := c.baseURL
 	path = strings.TrimLeft(path, "/")
 	return base + "/" + path
 }
 
 func parseAPIError(statusCode int, rawBody []byte, requestID string) error {
-	var apiErr apiErrorBody
+	var apiErr struct {
+		Message string      `json:"message,omitempty"`
+		Error   interface{} `json:"error,omitempty"`
+		Detail  string      `json:"detail,omitempty"`
+		Code    interface{} `json:"code,omitempty"`
+		Errors  interface{} `json:"errors,omitempty"`
+	}
 	_ = json.Unmarshal(rawBody, &apiErr)
 
 	msg := apiErr.Message
 	if msg == "" {
-		if s, ok := apiErr.Error.(string); ok {
+		if s, ok := apiErr.Error.(string); ok && s != "" {
 			msg = s
 		} else if apiErr.Detail != "" {
 			msg = apiErr.Detail
@@ -364,52 +347,19 @@ func parseAPIError(statusCode int, rawBody []byte, requestID string) error {
 	}
 }
 
-// --- Convenience top-level methods (aliases like in TS SDK) ---
-
-func (c *Client) CreatePayment(ctx context.Context, input CreatePaymentRequest) (*Payment, error) {
-	return c.Payments.Create(ctx, input)
+// TaloError represents an error returned by the Talo API.
+type TaloError struct {
+	StatusCode int         `json:"status_code,omitempty"`
+	ErrorCode  interface{} `json:"error_code,omitempty"`
+	Message    string      `json:"message"`
+	Details    interface{} `json:"details,omitempty"`
+	RequestID  string      `json:"request_id,omitempty"`
+	RawBody    string      `json:"raw_body,omitempty"`
 }
 
-func (c *Client) GetPayment(ctx context.Context, paymentID string) (*Payment, error) {
-	return c.Payments.Get(ctx, paymentID)
-}
-
-func (c *Client) UpdatePaymentMetadata(ctx context.Context, paymentID string, input UpdatePaymentMetadataRequest) (*Payment, error) {
-	return c.Payments.UpdateMetadata(ctx, paymentID, input)
-}
-
-func (c *Client) CreateCustomer(ctx context.Context, input CreateCustomerRequest) (*Customer, error) {
-	return c.Customers.Create(ctx, input)
-}
-
-func (c *Client) GetCustomer(ctx context.Context, customerID string) (*Customer, error) {
-	return c.Customers.Get(ctx, customerID)
-}
-
-func (c *Client) GetCustomerTransaction(ctx context.Context, customerID, transactionID string) (*CustomerTransaction, error) {
-	return c.Customers.GetTransaction(ctx, customerID, transactionID)
-}
-
-func (c *Client) GetPartnerAuthorizationURL(partnerID string, referredUserID string) string {
-	return c.Partners.GetAuthorizationURL(partnerID, referredUserID)
-}
-
-func (c *Client) ExchangePartnerToken(ctx context.Context, input PartnerTokenExchangeRequest) (*PartnerTokenExchangeResponse, error) {
-	return c.Partners.ExchangeToken(ctx, input)
-}
-
-func (c *Client) GetPartnerAccount(ctx context.Context, userID string) (*PartnerAccount, error) {
-	return c.Partners.GetAccount(ctx, userID)
-}
-
-func (c *Client) UpdatePartnerAccount(ctx context.Context, userID string, input UpdatePartnerAccountRequest) (*PartnerAccount, error) {
-	return c.Partners.UpdateAccount(ctx, userID, input)
-}
-
-func (c *Client) CreateRefund(ctx context.Context, paymentID string, input CreateRefundRequest) (*Refund, error) {
-	return c.Refunds.Create(ctx, paymentID, input)
-}
-
-func (c *Client) SimulateCvuTransfer(ctx context.Context, cvu string, input SimulateFaucetRequest) (*SimulateFaucetResponse, error) {
-	return c.Sandbox.SimulateCvuTransfer(ctx, cvu, input)
+func (e *TaloError) Error() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("talo: %s (status=%d, request_id=%s)", e.Message, e.StatusCode, e.RequestID)
+	}
+	return fmt.Sprintf("talo: %s (status=%d)", e.Message, e.StatusCode)
 }

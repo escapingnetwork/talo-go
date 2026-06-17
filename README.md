@@ -1,8 +1,8 @@
-# Talo Pay SDK (Go)
+# Talo Pay SDK for Go
 
-Type-safe Go client for the Talo Transfers API.
+Official Go SDK for the Talo Transfers API, structured similarly to the [Mercado Pago Go SDK](https://github.com/mercadopago/sdk-go).
 
-## Install
+## Installation
 
 ```bash
 go get github.com/escapingnetwork/talo-go
@@ -19,164 +19,144 @@ import (
 	"log"
 	"os"
 
-	"github.com/escapingnetwork/talo-go"
+	"github.com/escapingnetwork/talo-go/pkg/config"
+	"github.com/escapingnetwork/talo-go/pkg/payment"
 )
 
 func main() {
-	client, err := talo.NewClient(talo.Config{
-		ClientID:     os.Getenv("TALO_CLIENT_ID"),
-		ClientSecret: os.Getenv("TALO_CLIENT_SECRET"),
-		UserID:       os.Getenv("TALO_USER_ID"),
-		Environment:  talo.Sandbox, // or talo.Production
-	})
+	cfg, err := config.New(
+		os.Getenv("TALO_CLIENT_ID"),
+		os.Getenv("TALO_CLIENT_SECRET"),
+		os.Getenv("TALO_USER_ID"),
+		config.WithEnvironment(config.Sandbox),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	ctx := context.Background()
+	paymentClient := payment.NewClient(cfg)
 
-	// Create a payment
-	payment, err := client.CreatePayment(ctx, talo.CreatePaymentRequest{
+	pay, err := paymentClient.Create(context.Background(), payment.CreateRequest{
 		UserID: os.Getenv("TALO_USER_ID"),
-		Price: talo.CreatePaymentPrice{
-			Amount:   1500, // whole ARS units
+		Price: payment.CreatePaymentPrice{
+			Amount:   1500,
 			Currency: "ARS",
 		},
 		PaymentOptions: []string{"transfer"},
 		ExternalID:     "order_12345",
-		WebhookURL:     "https://your-app.com/api/talo/webhook",
+		WebhookURL:     "https://your-app.com/webhook",
 		Motive:         "Order #12345",
-		ClientData: &talo.ClientData{
-			FirstName: "Juan",
-			LastName:  "Perez",
-			Email:     "juan@example.com",
-			DNI:       "12345678",
-		},
-		// PartnerID: os.Getenv("TALO_PARTNER_ID"),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("Payment created:", payment.ID, payment.PaymentStatus)
+
+	fmt.Println("Created payment:", pay.ID, pay.PaymentStatus)
 }
 ```
 
-## Authentication
-
-The client automatically manages access tokens by calling `POST /users/{userId}/tokens` using your `clientId` + `clientSecret`.
-
-- Tokens are cached in memory.
-- Refreshed before expiration (using JWT `exp` claim).
-- Automatically retries once on HTTP 401.
-
-## Environments
+## Configuration
 
 ```go
-client, _ := talo.NewClient(talo.Config{
-    // ...
-    Environment: talo.Sandbox, // default is Production
-    // BaseURL: "https://custom.example.com", // overrides environment
-})
+cfg, _ := config.New(clientID, clientSecret, userID,
+    config.WithEnvironment(config.Sandbox),
+    // config.WithBaseURL("https://custom.api.talo.com.ar"),
+)
 ```
 
+The `Config` automatically handles:
+- JWT token acquisition & caching
+- Token refresh before expiration
+- Automatic retry on 401 Unauthorized
+
 ## Resources
+
+Each resource lives in its own package under `pkg/` and follows the same pattern:
+
+```go
+import (
+    "github.com/escapingnetwork/talo-go/pkg/config"
+    "github.com/escapingnetwork/talo-go/pkg/payment"
+    "github.com/escapingnetwork/talo-go/pkg/customer"
+    "github.com/escapingnetwork/talo-go/pkg/partner"
+    "github.com/escapingnetwork/talo-go/pkg/refund"
+    "github.com/escapingnetwork/talo-go/pkg/sandbox"
+)
+
+cfg, _ := config.New(...)
+
+paymentClient := payment.NewClient(cfg)
+customerClient := customer.NewClient(cfg)
+partnerClient := partner.NewClient(cfg)
+refundClient := refund.NewClient(cfg)
+sandboxClient := sandbox.NewClient(cfg)
+```
 
 ### Payments
 
 ```go
-payment, _ := client.Payments.Create(ctx, req)
-payment, _ := client.Payments.Get(ctx, "PAY-xxx")
-payment, _ := client.Payments.UpdateMetadata(ctx, "PAY-xxx", talo.UpdatePaymentMetadataRequest{Motive: "new reason"})
+p, _ := paymentClient.Create(ctx, payment.CreateRequest{...})
+p, _ := paymentClient.Get(ctx, "PAY-xxx")
+p, _ := paymentClient.UpdateMetadata(ctx, "PAY-xxx", payment.UpdateMetadataRequest{Motive: "new reason"})
 ```
 
 ### Customers
 
 ```go
-customer, _ := client.Customers.Create(ctx, talo.CreateCustomerRequest{...})
-customer, _ := client.Customers.Get(ctx, "CUST-xxx")
-tx, _ := client.Customers.GetTransaction(ctx, "CUST-xxx", "TX-xxx")
+c, _ := customerClient.Create(ctx, customer.CreateRequest{...})
+c, _ := customerClient.Get(ctx, "CUST-xxx")
+tx, _ := customerClient.GetTransaction(ctx, "CUST-xxx", "TX-xxx")
 ```
 
 ### Partners
 
 ```go
-// Build onboarding redirect URL
-authURL := client.Partners.GetAuthorizationURL("partner_123", "external_user_456")
-
-// Exchange code from callback
-exchange, _ := client.Partners.ExchangeToken(ctx, talo.PartnerTokenExchangeRequest{
-    Code:        "code_from_redirect",
-    ClientID:    os.Getenv("TALO_PARTNER_ID"),
-    ClientSecret: os.Getenv("TALO_PARTNER_SECRET"),
-})
-
-// Account config
-account, _ := client.Partners.GetAccount(ctx, exchange.UserID)
-_, _ = client.Partners.UpdateAccount(ctx, exchange.UserID, talo.UpdatePartnerAccountRequest{
-    TransferTolerance: intPtr(15),
-})
+authURL := partnerClient.GetAuthorizationURL("partner_123", "ext_user_456")
+exchange, _ := partnerClient.ExchangeToken(ctx, partner.TokenExchangeRequest{...})
+account, _ := partnerClient.GetAccount(ctx, exchange.UserID)
+_, _ = partnerClient.UpdateAccount(ctx, userID, partner.UpdateAccountRequest{...})
 ```
 
 ### Refunds
 
 ```go
-refund, _ := client.Refunds.Create(ctx, "PAY-123", talo.CreateRefundRequest{
+r, _ := refundClient.Create(ctx, "PAY-123", refund.CreateRequest{
     RefundType: "PARTIAL",
     Amount:     "500.00",
     Currency:   "ARS",
-    Blame: talo.RefundBlame{
-        TeamID: "support",
-        Mail:   "support@your-app.com",
-    },
-    UserID: os.Getenv("TALO_USER_ID"),
+    Blame:      refund.Blame{TeamID: "support", Mail: "support@your-app.com"},
+    UserID:     os.Getenv("TALO_USER_ID"),
 })
 ```
 
 ### Sandbox
 
 ```go
-// Only works in sandbox
-resp, _ := client.Sandbox.SimulateCvuTransfer(ctx, "0000000000000000000000", talo.SimulateFaucetRequest{
-    Amount: "1000.00",
-})
-```
-
-## Webhooks (example)
-
-```go
-http.HandleFunc("/webhook", client.WebhookHandler(func(event *talo.WebhookEvent, payment *talo.Payment, r *http.Request) error {
-    log.Printf("Payment %s updated to %s", event.PaymentID, event.Status)
-    if payment != nil {
-        log.Printf("Latest status from API: %s", payment.PaymentStatus)
-    }
-    return nil
-}))
-```
-
-Or use the low-level parser:
-
-```go
-event, err := talo.ParseWebhook(rawBody)
+resp, _ := sandboxClient.SimulateCvuTransfer(ctx, cvu, sandbox.SimulateFaucetRequest{Amount: "1000"})
 ```
 
 ## Error Handling
 
-All API errors return `*talo.TaloError`:
-
 ```go
-if taloErr, ok := err.(*talo.TaloError); ok {
-    fmt.Println(taloErr.StatusCode, taloErr.Message, taloErr.RequestID)
+if taloErr, ok := err.(*config.TaloError); ok {
+    fmt.Printf("Talo error: %s (status=%d, request_id=%s)\n", 
+        taloErr.Message, taloErr.StatusCode, taloErr.RequestID)
 }
 ```
 
-## Design Notes
+## Project Structure
 
-- Idiomatic Go: context.Context everywhere, pointer returns for responses, services for resources.
-- Zero external dependencies (stdlib only).
-- Automatic token management with JWT expiration parsing.
-- 401 retry with token refresh (matches original TS behavior).
-- Flexible JSON fields use `json.RawMessage` or `map[string]any` where the original used `.passthrough()`.
+```
+pkg/
+├── config/           # Central configuration + token management + HTTP layer
+├── payment/          # client.go + request.go + response.go
+├── customer/
+├── partner/
+├── refund/
+└── sandbox/
+```
 
-This SDK aims for feature parity with the official TypeScript SDK while following Go conventions.
-
-For full API reference, see the original docs in https://github.com/talo-pay/talo-sdk
+This structure closely follows the official Mercado Pago Go SDK pattern:
+- One `Config` per set of credentials
+- Independent `NewXXXClient(cfg)` for each domain
+- Clear separation of request/response models
