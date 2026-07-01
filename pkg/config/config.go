@@ -34,19 +34,26 @@ var defaultBaseURLs = map[Environment]string{
 	Sandbox:    "https://sandbox-api.talo.com.ar",
 }
 
+var defaultAuthorizeBaseURLs = map[Environment]string{
+	Production: "https://app.talo.com.ar/authorize",
+	Sandbox:    "https://sandbox.talo.com.ar/authorize",
+}
+
 // Config holds credentials and shared HTTP/token logic for Talo API clients.
 type Config struct {
 	ClientID     string
 	ClientSecret string
 	UserID       string
 	Environment  Environment
-	BaseURL      string
-	HTTPClient   *http.Client // optional custom HTTP client
+	BaseURL          string
+	AuthorizeBaseURL string
+	HTTPClient       *http.Client // optional custom HTTP client
 
 	// internal
-	tokenManager *tokenManager
-	httpClient   *http.Client
-	baseURL      string
+	tokenManager     *tokenManager
+	httpClient       *http.Client
+	baseURL          string
+	authorizeBaseURL string
 }
 
 // Option is a functional option for configuring Config.
@@ -60,6 +67,11 @@ func WithEnvironment(env Environment) Option {
 // WithBaseURL overrides the base URL completely.
 func WithBaseURL(baseURL string) Option {
 	return func(c *Config) { c.BaseURL = baseURL }
+}
+
+// WithAuthorizeBaseURL overrides the partner OAuth authorize base URL.
+func WithAuthorizeBaseURL(baseURL string) Option {
+	return func(c *Config) { c.AuthorizeBaseURL = baseURL }
 }
 
 // WithHTTPClient sets a custom *http.Client.
@@ -98,6 +110,15 @@ func New(clientID, clientSecret, userID string, opts ...Option) (*Config, error)
 		}
 	}
 	cfg.baseURL = strings.TrimRight(base, "/")
+
+	authorizeBase := cfg.AuthorizeBaseURL
+	if authorizeBase == "" {
+		authorizeBase = defaultAuthorizeBaseURLs[cfg.Environment]
+		if authorizeBase == "" {
+			authorizeBase = defaultAuthorizeBaseURLs[Production]
+		}
+	}
+	cfg.authorizeBaseURL = strings.TrimRight(authorizeBase, "/")
 
 	cfg.tokenManager = newTokenManager(cfg)
 
@@ -305,6 +326,11 @@ func (c *Config) DoRequest(ctx context.Context, method, path string, body interf
 		return json.Unmarshal(env.Data, out)
 	}
 	return json.Unmarshal(rawBody, out)
+}
+
+// GetAuthorizeBaseURL returns the resolved partner OAuth authorize base URL.
+func (c *Config) GetAuthorizeBaseURL() string {
+	return c.authorizeBaseURL
 }
 
 func (c *Config) buildURL(path string) string {

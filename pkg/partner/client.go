@@ -9,8 +9,6 @@ import (
 	"github.com/escapingnetwork/talo-go/pkg/config"
 )
 
-const partnerAuthorizeBase = "https://app.talo.com.ar/authorize"
-
 // Client defines partner operations.
 type Client interface {
 	GetAuthorizationURL(partnerID, referredUserID string) string
@@ -33,7 +31,7 @@ func (c *client) GetAuthorizationURL(partnerID, referredUserID string) string {
 	if partnerID == "" {
 		return ""
 	}
-	u := fmt.Sprintf("%s/%s", partnerAuthorizeBase, url.PathEscape(partnerID))
+	u := fmt.Sprintf("%s/%s", c.cfg.GetAuthorizeBaseURL(), url.PathEscape(partnerID))
 	if referredUserID != "" {
 		u += "?referred_user_id=" + url.QueryEscape(referredUserID)
 	}
