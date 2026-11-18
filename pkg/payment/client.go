@@ -27,6 +27,9 @@ func NewClient(cfg *config.Config) Client {
 
 // Create creates a new payment.
 func (c *client) Create(ctx context.Context, req CreateRequest) (*Payment, error) {
+	if err := validateStore(req.Store); err != nil {
+		return nil, err
+	}
 	var payment Payment
 	err := c.cfg.DoRequest(ctx, http.MethodPost, "/payments/", req, true, &payment)
 	if err != nil {

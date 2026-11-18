@@ -23,6 +23,7 @@ type Payment struct {
 	ClientData            *ClientData            `json:"client_data,omitempty"`
 	Metadata              map[string]interface{} `json:"metadata,omitempty"`
 	PartnerID             string                 `json:"partner_id,omitempty"`
+	Store                 *Store                 `json:"store,omitempty"`
 }
 
 // Price represents a monetary amount.

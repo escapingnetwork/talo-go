@@ -69,6 +69,8 @@ The `Config` automatically handles:
 - Token refresh before expiration
 - Automatic retry on 401 Unauthorized
 
+Authenticated calls, including `Create` (`POST /payments/`) and `Get` (`GET /payments/{id}`), always send `Authorization: Bearer <token>` with the Talo token. The token request itself does not send that header.
+
 ## Resources
 
 Each resource lives in its own package under `pkg/` and follows the same pattern:
@@ -95,10 +97,23 @@ sandboxClient := sandbox.NewClient(cfg)
 ### Payments
 
 ```go
-p, _ := paymentClient.Create(ctx, payment.CreateRequest{...})
+p, _ := paymentClient.Create(ctx, payment.CreateRequest{
+    UserID:         os.Getenv("TALO_USER_ID"),
+    Price:          payment.CreatePaymentPrice{Amount: 15000, Currency: "ARS"},
+    PaymentOptions: []string{"transfer"},
+    ExternalID:     "ORDER_123",
+    WebhookURL:     "https://your-app.com/webhook",
+    // Optional. The store must already exist in the Talo account.
+    Store: &payment.Store{
+        StoreType: payment.StoreTypeCustom,
+        StoreID:   "store-downtown",
+    },
+})
 p, _ := paymentClient.Get(ctx, "PAY-xxx")
 p, _ := paymentClient.UpdateMetadata(ctx, "PAY-xxx", payment.UpdateMetadataRequest{Motive: "new reason"})
 ```
+
+A payment created with `Store` gets an id that starts with `ST-`. `external_id` stays unique across the account, not per store. `Create` accepts only `store_type` `"custom"`. A response can still include another `store_type` when the API derived the store from a legacy integration.
 
 ### Customers
 
